@@ -1,23 +1,26 @@
-function [fwd_mesh,pj_error] = reconstruct_stnd_cw(fwd_mesh,...
-						recon_basis,...
-						data_fn,...
-						iteration,...
-						lambda,...
-						output_fn,...
-						filter_n)
+function [fwd_mesh,pj_error] = reconstruct_stnd_EP_onlystepsize(fwd_mesh,...
+                                                recon_basis,...
+                                                frequency,...
+                                                data_fn,...
+                                                iteration,...
+                                                lambda,...
+                                                output_fn,...
+                                                filter_n)
 
-% [fwd_mesh,pj_error] = reconstruct_stnd_cw(fwd_mesh,...
+% [fwd_mesh,pj_error] = reconstruct_stnd(fwd_mesh,...
 %                                        recon_basis,...
+%                                        frequency,...
 %                                        data_fn,...
 %                                        iteration,...
 %                                        lambda,...
 %                                        output_fn,...
 %                                        filter_n)
 %                                            
-% CW Reconstruction program for standard meshes
+% Reconstruction program for standard meshes
 %
 % fwd_mesh is the input mesh (variable or filename)
 % recon_basis is the reconstruction basis (pixel basis or mesh filename)
+% frequency is the modulation frequency (MHz)
 % data_fn is the boundary data (variable or filename)
 % iteration is the max number of iterations
 % lambda is the initial regularization value
@@ -26,11 +29,12 @@ function [fwd_mesh,pj_error] = reconstruct_stnd_cw(fwd_mesh,...
 
 
 
-
-% set modulation frequency to zero.
-frequency = 0;
-
 tic;
+
+if frequency < 0
+    errordlg('Frequency must be nonnegative','NIRFAST Error');
+    error('Frequency must be nonnegative');
+end
 
 %****************************************
 % If not a workspace variable, load mesh
@@ -48,7 +52,7 @@ if ischar(recon_basis)
   [fwd_mesh.fine2coarse,...
    recon_mesh.coarse2fine] = second_mesh_basis(fwd_mesh,recon_mesh);
 elseif isstruct(recon_basis)
-    recon_mesh = recon_basis;
+  recon_mesh = recon_basis;
   [fwd_mesh.fine2coarse,...
    recon_mesh.coarse2fine] = second_mesh_basis(fwd_mesh,recon_mesh);
 else
@@ -81,7 +85,10 @@ if ~isfield(anom,'paa')
     error('Data not found or not properly formatted');
 end
 anom = anom.paa;
-anom = log(anom(:,1));
+anom(:,1) = log(anom(:,1)); %take log of amplitude
+anom(:,2) = anom(:,2)/180.0*pi; % phase is in radians and not degrees
+anom(find(anom(:,2)<0),2) = anom(find(anom(:,2)<0),2) + (2*pi);
+anom(find(anom(:,2)>(2*pi)),2) = anom(find(anom(:,2)>(2*pi)),2) - (2*pi);
 % find NaN in data
 
 datanum = 0;
@@ -95,7 +102,7 @@ for i = 1 : ns
   end
 end
 
-ind = find(isnan(anom(:,1))==1);
+ind = unique([find(isnan(anom(:,1))==1); find(isnan(anom(:,2))==1)]);
 % set mesh linkfile not to calculate NaN pairs:
 link = fwd_mesh.link';
 link(ind) = 0;
@@ -106,6 +113,7 @@ clear link
 ind = setdiff(1:size(anom,1),ind);
 anom = anom(ind,:);
 clear ind;
+anom = reshape(anom',length(anom)*2,1); 
 
 % check for input regularization
 if isstruct(lambda) && ~(strcmp(lambda.type,'JJt') || strcmp(lambda.type,'JtJ'))
@@ -117,7 +125,7 @@ if ~isstruct(lambda)
 end
 % determine regularization type
 if strcmp(lambda.type, 'Automatic')
-    if size(anom,1)<size(recon_mesh.nodes,1)
+    if size(anom,1)<2*size(recon_mesh.nodes,1)
         lambda.type = 'JJt';
     else
         lambda.type = 'JtJ';
@@ -144,9 +152,16 @@ else
 end
 fprintf(fid_log,'Filter         = %d\n',filter_n);
 fprintf(fid_log,'Output Files   = %s_mua.sol\n',output_fn);
-fprintf(fid_log,'               = %s_mus.sol **CW recon only**\n',output_fn);
+fprintf(fid_log,'               = %s_mus.sol\n',output_fn);
 
 
+% Interpolate optical properties onto recon mesh
+[recon_mesh] = interpolatef2r(fwd_mesh,recon_mesh);
+xinitial = [recon_mesh.kappa; recon_mesh.mua];
+x = xinitial;
+
+
+% start non-linear itertaion image reconstruction part
 for it = 1 : iteration
   
   % Calculate jacobian
@@ -155,14 +170,19 @@ for it = 1 : iteration
   % Set jacobian as Phase and Amplitude part instead of complex
   J = J.complete;
 
-  % Read reference data
+  % Read reference data calculated by initial -current- guess
   clear ref;
-  ref = log(data.amplitude);
-  
+  ref(:,1) = log(data.amplitude);
+  ref(:,2) = data.phase;
+  ref(:,2) = ref(:,2)/180.0*pi;
+  ref(find(ref(:,2)<0),2) = ref(find(ref(:,2)<0),2) + (2*pi);
+  ref(find(ref(:,2)>(2*pi)),2) = ref(find(ref(:,2)>(2*pi)),2) - (2*pi);
+  ref = reshape(ref',length(ref)*2,1);
   data_diff = (anom-ref);
 
-  pj_error = [pj_error sum(abs(data_diff.^2))]; 
-  
+  % PJ error
+  pj_error = [pj_error sum(abs(data_diff.^2))];
+ 
   disp('---------------------------------');
   disp(['Iteration Number          = ' num2str(it)]);
   disp(['Projection error          = ' num2str(pj_error(end))]);
@@ -170,12 +190,12 @@ for it = 1 : iteration
   fprintf(fid_log,'---------------------------------\n');
   fprintf(fid_log,'Iteration Number          = %d\n',it);
   fprintf(fid_log,'Projection error          = %f\n',pj_error(end));
-
+  
   if it ~= 1
     p = (pj_error(end-1)-pj_error(end))*100/pj_error(end-1);
     disp(['Projection error change   = ' num2str(p) '%']);
     fprintf(fid_log,'Projection error change   = %f %%\n',p);
-    if p <= 2
+    if p <= .5 % stopping criteria is currently set at 2% decrease change
       disp('---------------------------------');
       disp('STOPPING CRITERIA REACHED');
       fprintf(fid_log,'---------------------------------\n');
@@ -184,88 +204,156 @@ for it = 1 : iteration
     end
   end
 
-  % Interpolate onto recon mesh
+  % Interpolate optical properties onto recon mesh
   [recon_mesh] = interpolatef2r(fwd_mesh,recon_mesh);
     
   % Normalize Jacobian wrt optical values
-  N = recon_mesh.mua;
+  N = [recon_mesh.kappa recon_mesh.mua];
   nn = length(recon_mesh.nodes);
-  % Normalise by looping through each node, rather than creating a
-  % diagonal matrix and then multiplying - more efficient for large meshes
-  for i = 1 : nn
-      J(:,i) = J(:,i).*N(i,1);
-  end
-  clear nn N
+  
+  diagonal = [N(:,1);N(:,2)];
+  Sinv = diag(diagonal);
+  S = diag(1./diagonal);
+  
+  J = J*Sinv;
 
   
-    
-  % Add regularization
+  
+  % Normalise by looping through each node, rather than creating a
+  % diagonal matrix and then multiplying - more efficient for large meshes
+  %for i = 1 : nn
+  %    J(:,i) = J(:,i).*N(i,1);
+  %    J(:,i+nn) = J(:,i+nn).*N(i,2);
+  %end
+  %clear nn N
+  
+  % Add regularization, which decreases at each iteration
   if it ~= 1
     lambda.value = lambda.value./10^0.25;
   end
   
   % build hessian
   [nrow,ncol]=size(J);
-  
   if strcmp(lambda.type, 'JJt')
-      
       Hess = zeros(nrow);
       Hess = (J*J');
- 
-      reg_amp = lambda.value*max(diag(Hess));
+      
+      % regularising for amplitude and phase
+      reg_amp = lambda.value*max(diag(Hess(1:2:end,1:2:end)));
+      reg_phs = lambda.value*max(diag(Hess(2:2:end,2:2:end)));
       reg = ones(nrow,1);
-      reg = reg.*reg_amp;
-
+      reg(1:2:end) = reg(1:2:end).*reg_amp;
+      reg(2:2:end) = reg(2:2:end).*reg_phs;
+      %clear reg_*
+  
       disp(['Amp Regularization        = ' num2str(reg(1,1))]);
+      disp(['Phs Regularization        = ' num2str(reg(2,1))]);
       fprintf(fid_log,'Amp Regularization        = %f\n',reg(1,1));
-
-      % Add regularisation to diagonal - looped rather than creating a matrix
-      % as it is computational more efficient for large meshes
+      fprintf(fid_log,'Phs Regularization        = %f\n',reg(2,1));
+            
+      % Add regularisation to diagonal - looped rather than creating a diaginal 
+      % matrix as it is computational more efficient for large meshes
       for i = 1 : nrow
           Hess(i,i) = Hess(i,i) + reg(i);
       end
 
       % Calculate update
       foo = J'*(Hess\data_diff);
-  
+            
   else
-      
+ 
       Hess = zeros(ncol);
       Hess = (J'*J);
- 
-      reg_mua = lambda.value*max(diag(Hess));
+      
+      % regularising for amplitude and phase
+      reg_kappa = lambda.value*max(diag(Hess(1:end/2,1:end/2)));
+      reg_mua = lambda.value*max(diag(Hess(end/2+1:end,end/2+1:end)));
       reg = ones(ncol,1);
-      reg = reg.*reg_mua;
+      reg(1:end/2) = reg(1:end/2).*reg_kappa;
+      reg(end/2+1:end) = reg(end/2+1:end).*reg_mua;
+      clear reg_*
+  
+      disp(['Kappa Regularization        = ' num2str(reg(1,1))]);
+      disp(['Mua Regularization        = ' num2str(reg(end,1))]);
+      fprintf(fid_log,'Kappa Regularization        = %f\n',reg(1,1));
+      fprintf(fid_log,'Mua Regularization        = %f\n',reg(end,1));
 
-      disp(['Mua Regularization        = ' num2str(reg(1,1))]);
-      fprintf(fid_log,'Mua Regularization        = %f\n',reg(1,1));
-
-      % Add regularisation to diagonal - looped rather than creating a matrix
-      % as it is computational more efficient for large meshes
+      % Add regularisation to diagonal - looped rather than creating a diaginal 
+      % matrix as it is computational more efficient for large meshes
       for i = 1 : ncol
           Hess(i,i) = Hess(i,i) + reg(i);
       end
 
       % Calculate update
-      foo = Hess\J'*data_diff;
-      
+      foo = Hess\(J'*data_diff);
   end
   
-  foo = foo.*recon_mesh.mua;
+  % normalise back using optical parameters
+  %foo = foo.*[recon_mesh.kappa;recon_mesh.mua];
+  
+  foo = Sinv*foo;
+  fookappa = foo(1:end/2);
+  foomua = foo(end/2+1:end);
+  xkappa = x(1:end/2);
+  xmua = x(end/2+1:end);
+  
+  
+  %xplotvalues = 0:.1:2;
+  %[bla,xplotlength] = size(xplotvalues);
+  %yplotvalues = zeros(xplotlength,1);
+  %for ii=1:xplotlength
+  %   s = xplotvalues(ii); 
+  %   if strcmp(lambda.type, 'JJt')
+  %       yplotvalues(ii) = norm((femdata_format(fwd_mesh,recon_mesh,xkappa+s.*fookappa,xmua+s.*foomua,frequency)-anom)./(sqrt(reg)))^2 ...
+  %          + norm(S*(s.*foo))^2;    
+  %   else
+  %       yplotvalues(ii) = norm(femdata_format(fwd_mesh,recon_mesh,xkappa+s.*fookappa,xmua+s.*foomua,frequency)-anom)^2 ...
+  %          + norm(S*(s.*(sqrt(reg).*foo)))^2;
+  %   end
+  %end
+  %
+  %figure, plot(xplotvalues,yplotvalues, 'r*',...
+  %              'LineWidth',2,...
+  %              'MarkerEdgeColor','g',...
+  %              'MarkerFaceColor','g',...
+  %              'MarkerSize',10); 
+  %drawnow;
+  
+  if strcmp(lambda.type, 'JJt')
+    s = fminbnd(@(s) (norm((femdata_format(fwd_mesh,recon_mesh,xkappa+s.*fookappa,xmua+s.*foomua,frequency)-anom)./(sqrt(reg)))^2 ...
+      + norm(S*(s.*foo))^2) ,0,2);    
+  else
+    s = fminbnd(@(s) (norm(femdata_format(fwd_mesh,recon_mesh,xkappa+s.*fookappa,xmua+s.*foomua,frequency)-anom)^2 ...
+      + norm(S*(s.*(sqrt(reg).*foo)))^2) ,0,2);
+  end
+  
+  disp(['Using stepsize = ' num2str(s)]);
+  fprintf(fid_log,'Stepsize        = %f\n',s);
+
+
+  x = x+s.*foo;
+  %x = x+foo;
   
   % Update values
-  recon_mesh.mua = recon_mesh.mua + foo;
-  recon_mesh.kappa = 1./(3.*(recon_mesh.mua + recon_mesh.mus));
+  recon_mesh.kappa = x(1:end/2);
+  recon_mesh.mua = x(end/2+1:end);
+  recon_mesh.mus = (1./(3.*recon_mesh.kappa))-recon_mesh.mua;
+
   
-  clear foo Hess Hess_norm tmp data_diff G
+  % Update values
+  %recon_mesh.kappa = recon_mesh.kappa + (foo(1:end/2));
+  %recon_mesh.mua = recon_mesh.mua + (foo(end/2+1:end));
+  %recon_mesh.mus = (1./(3.*recon_mesh.kappa))-recon_mesh.mua;
+  
+  clear foo Hess Hess_norm tmp data_diff G Sinv S
 
   % Interpolate optical properties to fine mesh
   [fwd_mesh,recon_mesh] = interpolatep2f(fwd_mesh,recon_mesh);
-
+  
   % We dont like -ve mua or mus! so if this happens, terminate
   if (any(fwd_mesh.mua<0) | any(fwd_mesh.mus<0))
     disp('---------------------------------');
-    disp('-ve mua calculated...not saving solution');
+    disp('-ve mua or mus calculated...not saving solution');
     fprintf(fid_log,'---------------------------------\n');
     fprintf(fid_log,'STOPPING CRITERIA REACHED\n');
     break
@@ -311,12 +399,9 @@ fprintf(fid_log,'Computation TimeRegularization = %f\n',time);
 fclose(fid_log);
 
 
-
-
-
 function [recon_mesh] = interpolatef2r(fwd_mesh,recon_mesh)
-
 % This function interpolates fwd_mesh into recon_mesh
+
 NNC = size(recon_mesh.nodes,1);
 
 for i = 1 : NNC
