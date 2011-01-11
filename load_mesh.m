@@ -340,55 +340,31 @@ elseif exist([fn '.link']) == 2
     junk = fgetl(fid);
     fclose(fid);
     if ~strcmp(junk(1),'s')
-        legacy = 1;
-    else
-        legacy = 0;
-    end
-    
-    if legacy
         
-        % find max length of detectors for any given source
-        fid = fopen([fn '.link']);
-        max_length = [];
-        k = 1;
-        junk = fgetl(fid);
-        while junk ~= -1
-            junk = length(str2num(junk));
-            max_length = max([max_length; junk]);
-            k = k + 1;
-            junk = fgetl(fid);
+        % convert to new
+        link = load([fn '.link']);
+        [n,m] = size(link);
+
+        fid = fopen([fn '.link'],'w');
+        fprintf(fid,'%s\n','source det active');
+        fl = 0;
+        for i = 1:n
+            for j = 1:m
+                if link(i,j) ~= 0
+                    fprintf(fid, '%g %g %g\n', i, link(i,j), 1);
+                elseif link(i,j) == 0
+                    fprintf(fid, '%g %g %g\n', i, 0, 0);
+                    fl = 1;
+                end
+            end
         end
         fclose(fid);
-        k = k-1;
-
-        % create a sparse, so if only some detectors are used for any
-        % given source, we are memory efficient!
-        if k~=0
-            mesh.link = sparse(k,max_length);
-            fid = fopen([fn '.link']);
-            for i = 1 : k
-                junk = str2num(fgetl(fid));
-                mesh.link(i,1:length(junk)) = junk;
-            end
-            fclose(fid);
-        else
-            mesh.link = [];
-        end
-        clear junk i k max_length
-        
-    else
-        
-        link = importdata([fn '.link']);
-        linkr = length(unique(link.data(:,1)));
-        linkc = sum(link.data(:,1)==link.data(1,1));
-        mesh.link = sparse(linkr,linkc);
-        for i=1:linkr
-            si = link.data(link.data(:,1)==i,2);
-            si(link.data(link.data(:,1)==i,3)==0) = 0;
-            mesh.link(i,1:length(si)) = si';
-        end
         
     end
+        
+    link = importdata([fn '.link']);
+    mesh.link = link.data;
+        
 end
 
 
